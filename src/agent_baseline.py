@@ -25,6 +25,9 @@ def _is_memory_question(message: str) -> bool:
             "tên mình là gì",
             "hiện tại mình làm",
             "mình làm nghề gì",
+            "nghề hiện tại",
+            "nghề cũ",
+            "nghề mới",
             "nghề nghiệp hiện tại",
             "đang ở đâu",
             "nơi ở hiện tại",
@@ -34,6 +37,9 @@ def _is_memory_question(message: str) -> bool:
             "món ăn yêu thích",
             "mình nuôi con gì",
             "tóm tắt ngắn về mình",
+            "bạn có biết",
+            "mối quan tâm",
+            "nhắc ngắn",
         )
     )
 

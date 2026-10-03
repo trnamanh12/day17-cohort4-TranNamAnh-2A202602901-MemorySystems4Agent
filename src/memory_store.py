@@ -87,7 +87,7 @@ def extract_profile_updates(message: str) -> dict[str, str]:
     location_matches = list(location_pattern.finditer(text))
     for match in reversed(location_matches):
         tail = text[match.end() : match.end() + 45].lower()
-        if re.match(r"\s*(?:chứ\s+)?(?:không\s+còn|không\s+phải|đã\s+rời)", tail):
+        if re.match(r"\s*(?:chứ\s+)?(?:không\s+phải|đã\s+rời)", tail):
             continue
         updates["current_location"] = re.sub(r"\s+", " ", match.group("location")).strip()
         break
