@@ -74,7 +74,7 @@ message người dùng
 
 Baseline Agent chỉ giữ danh sách message theo `thread_id`. Sang thread mới, nó **phải quên** toàn bộ fact cũ.
 
-Cả hai agent nên có **chế độ offline** cho ra kết quả lặp lại được, để benchmark và test chạy được mà không cần API key. Chế độ live (LangChain/LangGraph) là phần mở rộng.
+Cả hai agent có **chế độ offline** cho kết quả lặp lại được, để benchmark và test chạy không cần API key. Khi cấu hình credentials và cài integration tương ứng, chế độ live gọi chat model qua LangChain; ứng dụng vẫn quản lý lịch sử thread, profile và compaction.
 
 ## Dữ liệu benchmark
 
@@ -164,6 +164,23 @@ pytest src/test_agents.py -v
 ```
 
 Benchmark cần in ra hai bảng: **Standard Benchmark** và **Long-Context Stress Benchmark**. Mỗi bảng so sánh Baseline với Advanced theo đủ 6 cột trong phần "Chỉ số benchmark cần hiểu".
+
+## Kết quả và phân tích
+
+Kết quả offline với dữ liệu mẫu:
+
+| Bộ benchmark | Agent | Agent tokens only | Prompt tokens processed | Cross-session recall | Response quality | Memory growth (bytes) | Compactions |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Standard | Baseline | 1,664 | 16,923 | 0% | 30% | 0 | 0 |
+| Standard | Advanced | 3,104 | 27,532 | 100% | 100% | 331 | 0 |
+| Long-context stress | Baseline | 406 | 23,048 | 0% | 30% | 0 | 0 |
+| Long-context stress | Advanced | 539 | 13,511 | 100% | 100% | 239 | 3 |
+
+`Response quality` là heuristic offline, tính 70% theo expected facts và 30% theo câu trả lời gọn, không rỗng; đây không phải điểm do LLM judge chấm. Token là ước lượng ký tự chia bốn, nên dùng để so sánh hai agent trên cùng dữ liệu, không thay cho số token của provider.
+
+Advanced tốn prompt hơn ở benchmark standard vì mỗi lượt mang theo `User.md`, và chưa có thread nào đủ dài để compact. Dù vậy, profile bền vững nâng recall qua thread mới từ 0% lên 100%. Trong stress test, compaction xảy ra ba lần và giảm prompt tokens processed khoảng 41% so với baseline. Compact tác động chủ yếu lên prompt vì nó giới hạn lịch sử cũ được gửi lại ở các lượt sau; nó không đảm bảo giảm token câu trả lời. Advanced tăng agent tokens một phần do phản hồi offline kèm các fact đã lưu.
+
+Profile mẫu tăng 331 bytes ở standard và 239 bytes ở stress. Fact được lưu theo field và correction khai báo rõ sẽ cập nhật giá trị cũ; các câu hỏi, chuyến đi họp, và câu nói đùa trong dữ liệu stress không được lưu làm nghề nghiệp hay nơi ở. Regex có chủ đích chỉ nhận một số mẫu tiếng Việt rõ ràng, nên có thể bỏ sót cách diễn đạt khác. Khi profile lớn dần hoặc extractor mở rộng, cần cân nhắc kiểm tra người dùng, decay, và giới hạn dung lượng để giảm rủi ro lưu sai hoặc giữ fact lỗi thời.
 
 ## Cách dùng repo này
 
