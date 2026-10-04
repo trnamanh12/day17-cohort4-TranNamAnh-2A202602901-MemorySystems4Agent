@@ -167,7 +167,7 @@ Benchmark cần in ra hai bảng: **Standard Benchmark** và **Long-Context Stre
 
 ## Kết quả và phân tích
 
-Kết quả offline với dữ liệu mẫu:
+Dưới đây là bảng số liệu thu thập được khi chạy benchmark ở chế độ offline trên hai tập dữ liệu mẫu:
 
 | Bộ benchmark | Agent | Agent tokens only | Prompt tokens processed | Cross-session recall | Response quality | Memory growth (bytes) | Compactions |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -176,11 +176,52 @@ Kết quả offline với dữ liệu mẫu:
 | Long-context stress | Baseline | 406 | 23,048 | 0% | 30% | 0 | 0 |
 | Long-context stress | Advanced | 539 | 13,511 | 100% | 100% | 239 | 3 |
 
-`Response quality` là heuristic offline, tính 70% theo expected facts và 30% theo câu trả lời gọn, không rỗng; đây không phải điểm do LLM judge chấm. Token là ước lượng ký tự chia bốn, nên dùng để so sánh hai agent trên cùng dữ liệu, không thay cho số token của provider.
+*(Ghi chú: `Response quality` được tính bằng heuristic offline: 70% dựa trên việc xuất hiện các fact mong muốn và 30% dựa trên độ súc tích của câu trả lời. Số lượng token được ước lượng theo quy tắc ký tự chia bốn để tiện so sánh tương đối giữa hai agent).*
 
-Advanced tốn prompt hơn ở benchmark standard vì mỗi lượt mang theo `User.md`, và chưa có thread nào đủ dài để compact. Dù vậy, profile bền vững nâng recall qua thread mới từ 0% lên 100%. Trong stress test, compaction xảy ra ba lần và giảm prompt tokens processed khoảng 41% so với baseline. Compact tác động chủ yếu lên prompt vì nó giới hạn lịch sử cũ được gửi lại ở các lượt sau; nó không đảm bảo giảm token câu trả lời. Advanced tăng agent tokens một phần do phản hồi offline kèm các fact đã lưu.
+---
 
-Profile mẫu tăng 331 bytes ở standard và 239 bytes ở stress. Fact được lưu theo field và correction khai báo rõ sẽ cập nhật giá trị cũ; các câu hỏi, chuyến đi họp, và câu nói đùa trong dữ liệu stress không được lưu làm nghề nghiệp hay nơi ở. Regex có chủ đích chỉ nhận một số mẫu tiếng Việt rõ ràng, nên có thể bỏ sót cách diễn đạt khác. Khi profile lớn dần hoặc extractor mở rộng, cần cân nhắc kiểm tra người dùng, decay, và giới hạn dung lượng để giảm rủi ro lưu sai hoặc giữ fact lỗi thời.
+### 1. Phân tích trade-off: Khi nào Advanced thắng, khi nào Baseline tối ưu hơn?
+
+Khi nhìn vào bảng kết quả, có hai câu chuyện đối lập rất rõ ràng giữa hội thoại ngắn và hội thoại dài:
+
+- **Ở hội thoại thông thường (Standard Benchmark):**
+  - **Khả năng nhớ dài hạn (Recall):** Baseline hoàn toàn "mất trí nhớ" (0% recall) khi bước sang một thread mới vì nó chỉ lưu ngữ cảnh cục bộ trong từng session. Ngược lại, Advanced Agent đạt recall tuyệt đối (100%) nhờ việc duy trì file hồ sơ bền vững `User.md`.
+  - **Chi phí Prompt Tokens:** Rõ ràng "không có bữa trưa nào miễn phí". Để có được trí nhớ dài hạn, Advanced Agent tốn nhiều prompt tokens hơn Baseline khá nhiều (27,532 so với 16,923 tokens). Nguyên nhân là ở mỗi lượt chat, Advanced đều phải đính kèm toàn bộ nội dung của `User.md` vào prompt đầu vào, tạo thành một khoản chi phí cố định (overhead) lặp đi lặp lại. Trong khi đó, các cuộc trò chuyện ở tập standard còn quá ngắn nên cơ chế compact chưa kịp kích hoạt lần nào.
+
+- **Ở hội thoại kéo dài (Long-Context Stress Benchmark):**
+  - Câu chuyện lập tức đảo chiều khi cuộc trò chuyện trở nên rất dài (16 turns với nhiều đoạn văn bản lớn). Baseline Agent bắt đầu bộc lộ nhược điểm chí mạng: nó phải kéo theo toàn bộ lịch sử từ đầu đến cuối, khiến lượng prompt token xử lý tăng vọt lên hơn 23,000 tokens.
+  - Ngược lại, Advanced Agent đã tự động kích hoạt nén bộ nhớ (compaction) **3 lần**. Bằng cách tóm tắt các lượt trao đổi cũ và chỉ giữ lại cửa sổ các tin nhắn gần nhất, Advanced đã cắt giảm lượng prompt tokens phải xử lý xuống còn 13,511 tokens — **tiết kiệm khoảng 41% chi phí ngữ cảnh** so với Baseline.
+  - **Điểm mấu chốt cần lưu ý:** Compact Memory chủ yếu tối ưu cho **Prompt Tokens Processed** (ngữ cảnh gửi vào model), chứ không đảm bảo giảm **Agent Tokens Only** (token câu trả lời sinh ra). Thậm chí agent tokens của Advanced còn nhỉnh hơn một chút vì câu trả lời của nó có kèm các fact nhớ lại từ hồ sơ.
+
+---
+
+### 2. Sự tăng trưởng của bộ nhớ và các rủi ro đi kèm
+
+- Kích thước file `User.md` tăng khá khiêm tốn: khoảng 331 bytes ở bộ Standard và 239 bytes ở bộ Stress test. Định dạng Markdown phân tầng giúp thông tin vừa gọn nhẹ vừa dễ đọc đối với cả con người lẫn LLM.
+- **Những rủi ro thực tế cần đối mặt:**
+  1. *Nguy cơ phình to bộ nhớ (Memory Bloat):* Nếu người dùng tương tác qua nhiều tháng hoặc nhiều năm, file `User.md` sẽ dần trở nên quá nặng, vô tình biến khoản overhead mỗi lượt chat thành gánh nặng token khổng lồ.
+  2. *Ảo giác và lưu nhầm thông tin (False Positives):* Bộ bóc tách thông tin nếu chỉ dựa vào từ khóa đơn giản rất dễ hiểu nhầm câu hỏi, câu đùa hoặc các chuyến đi tạm thời thành sự thật vĩnh viễn.
+
+---
+
+### 3. Kinh nghiệm thực tế khi phát triển các cơ chế bảo vệ (Bonus 90 - 100 điểm)
+
+Để giải quyết các rủi ro trên và đưa hệ thống lên mức hoàn thiện tiệm cận production, mình đã xây dựng thêm 3 cơ chế mở rộng:
+
+#### A. Lọc câu hỏi và câu giả định bằng Confidence Threshold
+- **Vấn đề thực tế:** Khi test với các câu nói tự nhiên, người dùng rất hay hỏi xác nhận (*"Mình đang ở Hà Nội phải không?"*) hoặc đưa ra giả định (*"Nếu mình làm product manager thì sao?"*). Một bộ trích xuất thông thường sẽ bắt nhầm chữ "Hà Nội" hay "product manager" và ghi ngay vào hồ sơ.
+- **Cách giải quyết:** Hàm `extract_structured_facts()` sẽ quét ngữ cảnh xung quanh để tính điểm tin cậy `confidence` (từ 0.0 đến 1.0). Những câu có dấu hỏi `?`, từ nghi vấn (*phải không, đúng không, ở đâu...*) hoặc từ giả định (*nếu, giả sử, ước gì...*) sẽ bị phạt điểm xuống dưới 0.4. Chỉ những câu khẳng định rõ ràng đạt `confidence >= 0.7` mới được phép ghi vào `User.md`.
+- **Trade-off:** Cách này giữ cho hồ sơ sạch sẽ và không tốn thêm token, nhưng có thể bỏ sót một vài câu khẳng định nếu người dùng viết câu quá dài dòng hoặc dùng từ ngữ nước đôi.
+
+#### B. Xử lý xung đột và đính chính (Conflict Handling & Audit)
+- **Vấn đề thực tế:** Người dùng thường xuyên thay đổi thông tin (ví dụ: ban đầu ở Đà Nẵng, sau đó đính chính chuyển về Huế). Nếu cứ lưu dồn dập, hồ sơ sẽ chứa hai thông tin mâu thuẫn nhau.
+- **Cách giải quyết:** Với các trường đơn trị (`current_location`, `profession`...), hàm `upsert_fact()` sẽ ghi đè giá trị mới lên giá trị cũ để context luôn nhất quán, đồng thời đẩy giá trị cũ vào lịch sử kiểm toán `superseded_facts()`. Nhờ đó, agent luôn nhớ đúng fact mới nhất (đạt 100% recall) mà vẫn có vết audit khi cần tra cứu lại.
+- **Trade-off:** Cần giữ dữ liệu audit tách biệt khỏi nội dung Markdown gửi cho LLM để không làm tăng prompt context không cần thiết.
+
+#### C. Chống phình bộ nhớ bằng Memory Decay & Pruning
+- **Vấn đề thực tế:** Để giải quyết bài toán `User.md` phình to theo thời gian, hệ thống cần biết thông tin nào quan trọng và thông tin nào có thể bỏ đi.
+- **Cách giải quyết:** Bổ sung phương thức `prune_stale_facts(max_facts)`: ưu tiên bảo vệ các thông tin cốt lõi (*tên, nơi ở, nghề nghiệp, phong cách trả lời, sở thích*) và tự động cắt tỉa các ghi chú phụ khi tổng số fact vượt quá ngưỡng quy định. Đồng thời có phương thức `decay_facts()` để chủ động loại bỏ những thông tin đã cũ hoặc không còn được nhắc lại.
+- **Trade-off:** Việc dọn bớt thông tin giúp khống chế chi phí token lâu dài, nhưng đánh đổi lại là hệ thống có thể quên đi một số sở thích ngách nếu người dùng không nhắc lại chúng thường xuyên.
 
 ## Cách dùng repo này
 

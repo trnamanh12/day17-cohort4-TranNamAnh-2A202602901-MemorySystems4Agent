@@ -69,7 +69,8 @@ class AdvancedAgent:
         }
 
     def _update_profile(self, user_id: str, message: str) -> None:
-        updates = extract_profile_updates(message)
+        threshold = getattr(self.config, "confidence_threshold", 0.7)
+        updates = extract_profile_updates(message, min_confidence=threshold)
         current = self.profile_store.facts(user_id)
         for key, value in updates.items():
             if key == "response_style":

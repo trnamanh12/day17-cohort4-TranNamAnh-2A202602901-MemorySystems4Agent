@@ -18,6 +18,7 @@ class LabConfig:
     compact_keep_messages: int
     model: ProviderConfig
     judge_model: ProviderConfig
+    confidence_threshold: float = 0.7
 
 
 def load_config(base_dir: Path | None = None) -> LabConfig:
@@ -90,6 +91,7 @@ def load_config(base_dir: Path | None = None) -> LabConfig:
     data_dir = path_setting("DATA_DIR", root / "data")
     state_dir = path_setting("STATE_DIR", root / "state")
     state_dir.mkdir(parents=True, exist_ok=True)
+    confidence_threshold = float(os.getenv("CONFIDENCE_THRESHOLD", "0.7"))
     return LabConfig(
         base_dir=root,
         data_dir=data_dir,
@@ -98,4 +100,5 @@ def load_config(base_dir: Path | None = None) -> LabConfig:
         compact_keep_messages=integer_setting("COMPACT_KEEP_MESSAGES", 4),
         model=model,
         judge_model=judge_model,
+        confidence_threshold=confidence_threshold,
     )

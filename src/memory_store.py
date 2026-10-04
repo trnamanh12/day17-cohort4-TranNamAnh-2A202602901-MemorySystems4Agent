@@ -17,6 +17,7 @@ class UserProfileStore:
     """Store each user's durable facts in a readable ``User.md`` file."""
 
     root_dir: Path
+    _history: dict[str, dict[str, list[str]]] = field(default_factory=dict)
 
     def path_for(self, user_id: str) -> Path:
         slug = re.sub(r"[^A-Za-z0-9_-]+", "-", user_id).strip("-_") or "user"
@@ -57,23 +58,108 @@ class UserProfileStore:
 
     def upsert_fact(self, user_id: str, key: str, value: str) -> Path:
         facts = self.facts(user_id)
+        if key in facts and facts[key] != value:
+            self._history.setdefault(user_id, {}).setdefault(key, []).append(facts[key])
         if value:
             facts[key] = value
         lines = ["# User profile", ""]
         lines.extend(f"- {fact_key}: {fact_value}" for fact_key, fact_value in facts.items())
         return self.write_text(user_id, "\n".join(lines))
 
+    def superseded_facts(self, user_id: str) -> dict[str, list[str]]:
+        """Return history of overridden/superseded facts for audit & conflict resolution."""
+        return self._history.get(user_id, {})
 
-def extract_profile_updates(message: str) -> dict[str, str]:
-    """Extract only explicit, positive profile statements from Vietnamese turns."""
-    text = message.split("?", 1)[0]
-    updates: dict[str, str] = {}
+    def decay_facts(self, user_id: str, keys_to_remove: list[str]) -> Path:
+        """Remove specified decayed or obsolete facts from the profile."""
+        facts = self.facts(user_id)
+        for key in keys_to_remove:
+            facts.pop(key, None)
+        lines = ["# User profile", ""]
+        lines.extend(f"- {fact_key}: {fact_value}" for fact_key, fact_value in facts.items())
+        return self.write_text(user_id, "\n".join(lines))
+
+    def prune_stale_facts(
+        self,
+        user_id: str,
+        keep_keys: set[str] | None = None,
+        max_facts: int = 10,
+    ) -> int:
+        """Prune low-priority facts if profile exceeds max_facts to prevent unbounded growth."""
+        essential_keys = keep_keys or {
+            "name",
+            "current_location",
+            "profession",
+            "response_style",
+            "interests",
+        }
+        current = self.facts(user_id)
+        if len(current) <= max_facts:
+            return 0
+        removable = [k for k in current if k not in essential_keys]
+        num_pruned = 0
+        while len(current) > max_facts and removable:
+            target = removable.pop()
+            del current[target]
+            num_pruned += 1
+        lines = ["# User profile", ""]
+        lines.extend(f"- {fact_key}: {fact_value}" for fact_key, fact_value in current.items())
+        self.write_text(user_id, "\n".join(lines))
+        return num_pruned
+
+
+@dataclass
+class ExtractedFact:
+    """A candidate fact extracted from text with structured metadata and confidence."""
+
+    key: str
+    value: str
+    confidence: float
+    is_correction: bool = False
+    source_segment: str = ""
+
+
+def _evaluate_confidence(text: str, start: int, end: int, is_corr: bool = False) -> float:
+    low = text.lower()
+    pre = low[max(0, start - 50) : start]
+    post = low[end : min(len(low), end + 50)]
+    surrounding = f"{pre} {post}"
+
+    # Jokes, sarcasm or casual negation
+    if any(cue in surrounding for cue in ("đùa", "câu đùa", "trêu", "nói chơi", "chỉ là nơi")):
+        return 0.10
+
+    # Question detection: '?' anywhere in the sentence or explicit question cues
+    question_cues = (
+        "phải không", "đúng không", "chăng", "hả", "có phải",
+        "ở đâu", "là gì", "sao", "thế nào", "bao giờ", "nhắc lại", "nhớ lại"
+    )
+    if "?" in text or any(re.search(rf"\b{re.escape(q)}\b", surrounding) for q in question_cues):
+        return 0.30
+
+    # Doubt or hypotheticals in preceding context
+    hypothetical_cues = ("nếu", "giả sử", "ước gì", "hình như", "có lẽ", "chắc là", "có thể", "không biết")
+    if any(re.search(rf"\b{re.escape(h)}\b", pre) for h in hypothetical_cues):
+        return 0.40
+
+    if is_corr:
+        return 1.0
+
+    return 0.95
+
+
+def extract_structured_facts(message: str) -> list[ExtractedFact]:
+    """Extract candidate facts along with confidence and correction flags."""
+    text = message.strip()
+    low = text.lower()
+    facts: list[ExtractedFact] = []
 
     name = re.search(r"\bmình\s+tên\s+là\s+([^.!?;,\n]+)", text, re.IGNORECASE)
     if name:
         value = name.group(1).strip().rstrip(".")
         if value and value.lower() not in {"gì", "ai", "không"}:
-            updates["name"] = value
+            conf = _evaluate_confidence(text, name.start(), name.end())
+            facts.append(ExtractedFact("name", value, conf, False, name.group(0)))
 
     locations = r"Đà\s+Nẵng|Hà\s+Nội|Huế"
     location_pattern = re.compile(
@@ -89,7 +175,10 @@ def extract_profile_updates(message: str) -> dict[str, str]:
         tail = text[match.end() : match.end() + 45].lower()
         if re.match(r"\s*(?:chứ\s+)?(?:không\s+phải|đã\s+rời)", tail):
             continue
-        updates["current_location"] = re.sub(r"\s+", " ", match.group("location")).strip()
+        val = re.sub(r"\s+", " ", match.group("location")).strip()
+        is_corr = bool(re.search(r"\b(?:đính chính|giờ|hiện tại|chuyển)\b", low[: match.start()]))
+        conf = _evaluate_confidence(text, match.start(), match.end(), is_corr)
+        facts.append(ExtractedFact("current_location", val, conf, is_corr, match.group(0)))
         break
 
     roles = r"backend\s+engineer|MLOps\s+engineer|software\s+engineer"
@@ -104,16 +193,18 @@ def extract_profile_updates(message: str) -> dict[str, str]:
         prefix = text[max(0, match.start() - 50) : match.start()].lower()
         if any(cue in prefix for cue in ("hay là", "đùa", "nếu", "ước gì")):
             continue
-        updates["profession"] = re.sub(r"\s+", " ", match.group("role")).strip()
+        val = re.sub(r"\s+", " ", match.group("role")).strip()
+        is_corr = "chuyển sang" in match.group(0).lower() or "đính chính" in prefix
+        conf = _evaluate_confidence(text, match.start(), match.end(), is_corr)
+        facts.append(ExtractedFact("profession", val, conf, is_corr, match.group(0)))
         break
 
     style_cues = ("ngắn gọn", "gọn", "bullet", "ví dụ", "trade-off", "tradeoff", "lan man", "cấu trúc")
-    if any(cue in text.lower() for cue in style_cues) and re.search(
+    if any(cue in low for cue in style_cues) and re.search(
         r"trả lời|câu trả lời|style|giải thích|ưu tiên|mình thích|mình muốn|hãy",
         text,
         re.IGNORECASE,
     ):
-        low = text.lower()
         style = ["ngắn gọn"] if any(cue in low for cue in ("ngắn gọn", "lan man", "gọn")) else []
         if "3 bullet" in low:
             style.append("3 bullet")
@@ -125,17 +216,21 @@ def extract_profile_updates(message: str) -> dict[str, str]:
             style.append("ưu tiên trade-off")
         if "rõ ý" in low or "cấu trúc" in low:
             style.append("rõ ý")
-        updates["response_style"] = ", ".join(dict.fromkeys(style))
+        val = ", ".join(dict.fromkeys(style))
+        conf = 0.95 if "?" not in text else 0.30
+        facts.append(ExtractedFact("response_style", val, conf, False, "style"))
 
-    low = text.lower()
     if any(cue in low for cue in ("đồ uống yêu thích", "mình thích", "vẫn uống")) and "cà phê sữa đá" in low:
-        updates["favorite_drink"] = "cà phê sữa đá"
+        conf = 0.95 if not any(q in low for q in ("không?", "là gì", "phải không", "?")) else 0.30
+        facts.append(ExtractedFact("favorite_drink", "cà phê sữa đá", conf, False, "favorite_drink"))
     if "mì quảng" in low and re.search(r"món ăn yêu thích|món ruột|mình thích", low):
-        updates["favorite_food"] = "mì Quảng"
+        conf = 0.95 if "?" not in text else 0.30
+        facts.append(ExtractedFact("favorite_food", "mì Quảng", conf, False, "favorite_food"))
 
     pet = re.search(r"\bnuôi\s+(?:một\s+)?(?:bé\s+)?corgi\s+tên\s+([\wÀ-ỹ-]+)", text, re.IGNORECASE)
     if pet:
-        updates["pet"] = f"corgi tên {pet.group(1).strip()}"
+        conf = 0.95 if "?" not in text else 0.30
+        facts.append(ExtractedFact("pet", f"corgi tên {pet.group(1).strip()}", conf, False, pet.group(0)))
 
     interest_statement = re.search(
         r"(?:quan\s+tâm(?:\s+nhiều)?\s+đến|mình\s+(?:rất\s+|vẫn\s+)?thích)\s+([^.!?\n]{1,100})",
@@ -153,9 +248,16 @@ def extract_profile_updates(message: str) -> dict[str, str]:
                 if canonical.lower() not in {item.lower() for item in found}:
                     found.append(canonical)
         if found:
-            updates["interests"] = ", ".join(found)
+            conf = 0.95 if "?" not in text else 0.30
+            facts.append(ExtractedFact("interests", ", ".join(found), conf, False, interest_statement.group(0)))
 
-    return updates
+    return facts
+
+
+def extract_profile_updates(message: str, min_confidence: float = 0.7) -> dict[str, str]:
+    """Extract explicit, positive profile statements from Vietnamese turns with confidence >= min_confidence."""
+    facts = extract_structured_facts(message)
+    return {f.key: f.value for f in facts if f.confidence >= min_confidence}
 
 
 def summarize_messages(messages: list[dict[str, str]], max_items: int = 6) -> str:
